@@ -66,6 +66,9 @@
 #include "shctx.h"
 #include "configuration.h"
 
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+
 #ifndef MSG_NOSIGNAL
 # define MSG_NOSIGNAL 0
 #endif
@@ -90,9 +93,13 @@
 #endif
 #endif
 
+#define MAX_MACHINE_INTERFACES 10
+
 /* Globals */
 static struct ev_loop *loop;
 static struct addrinfo *backaddr;
+static int total_interfaces;
+static struct sockaddr_in outgoing_interfaces[MAX_MACHINE_INTERFACES];
 static pid_t master_pid;
 static ev_io listener;
 static int listener_socket;
@@ -852,6 +859,10 @@ static int create_main_socket() {
  * of a newly connected upstream (encrypted) client*/
 static int create_back_socket() {
     int s = socket(backaddr->ai_family, SOCK_STREAM, IPPROTO_TCP);
+    int bindret = bind(s, (struct sockaddr *) &outgoing_interfaces[child_num%total_interfaces], sizeof(outgoing_interfaces[child_num%total_interfaces]));
+    if (bindret == -1) {
+      perror("socket error: %d, %s\n", errno, strerror(errno));
+    }
 
     if (s == -1)
       return -1;
@@ -1516,6 +1527,7 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
  * on the bound socket, etc */
 static void handle_connections() {
     LOG("{core} Process %d online\n", child_num);
+    printf("{core} Process %d will use address %s\n", child_num, inet_ntoa(outgoing_interfaces[child_num%total_interfaces].sin_addr));
 
     /* child cannot create new children... */
     create_workers = 0;
@@ -1576,6 +1588,25 @@ void init_globals() {
         ERR("{getaddrinfo}: [%s]", gai_strerror(gai_err));
         exit(1);
     }
+
+    struct ifaddrs *ifap, *ifa;
+    struct sockaddr_in *sa;
+    char *addr;
+    getifaddrs (&ifap);
+    for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr->sa_family==AF_INET) {
+            sa = (struct sockaddr_in *) ifa->ifa_addr;
+            addr = inet_ntoa(sa->sin_addr);
+            if (strcmp(ifa->ifa_name, "lo") != 0) {
+                printf("{core} Interface: %s\tAddress: %s\n", ifa->ifa_name, addr);
+                outgoing_interfaces[total_interfaces].sin_family = AF_INET;
+                inet_pton(AF_INET, addr, &(outgoing_interfaces[total_interfaces].sin_addr));
+                ++total_interfaces;
+            }
+        }
+    }
+    freeifaddrs(ifap);
+
 
 #ifdef USE_SHARED_CACHE
     if (CONFIG->SHARED_CACHE) {
